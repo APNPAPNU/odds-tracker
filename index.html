@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1b33">
+<title>Odds Tracker - arbitrage, +EV, vig</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>Odds Tracker</h1>
+    <div class="right">
+      <div class="upd" id="upd">loading&hellip;</div>
+      <button id="refresh" type="button" aria-label="Refresh data now"><span class="ic">&#8635;</span> <span class="lbl">Refresh</span></button>
+    </div>
+  </div>
+  <nav id="tabs">
+    <a href="#arb" data-tab="arb">Arbitrage <span class="badge" id="n-arb"></span></a>
+    <a href="#ev" data-tab="ev">Positive EV <span class="badge" id="n-ev"></span></a>
+    <a href="#vig" data-tab="vig">Vig by Book</a>
+    <a href="#about" data-tab="about">About</a>
+  </nav>
+</header>
+<main>
+  <section id="arb" class="tab">
+    <div class="card note">Each card is a set of bets at different books that profits whichever side wins. Type a total stake to split it. Lines marked
+      <span class="pill red">verify before betting</span> differ sharply from the other books and may be stale. Check the price at the book first.</div>
+    <div id="arb-list"></div>
+  </section>
+  <section id="ev" class="tab">
+    <div class="card filters">
+      <label>Sport <select id="f-sport"><option value="">All</option></select></label>
+      <label>Min EV % <input id="f-ev" type="number" step="0.5" value="0" inputmode="decimal"></label>
+      <label>Max odds <input id="f-odds" type="number" step="50" placeholder="e.g. 300" inputmode="numeric"></label>
+      <label>Market <select id="f-mkt"><option value="">All</option><option>moneyline</option><option>spread</option><option>total</option></select></label>
+      <label class="chk"><input id="f-high" type="checkbox"> Pinnacle-backed only</label>
+      <label class="chk"><input id="f-stale" type="checkbox"> Hide "verify" lines</label>
+    </div>
+    <div class="meta" id="ev-meta"></div>
+    <div id="ev-list"></div>
+  </section>
+  <section id="vig" class="tab">
+    <div class="card note">Vig (hold) = sum of a book's implied probabilities on a market minus 1. It's the book's built-in margin, so lower is better for you. Averages cover every market each book posted in the current slate.</div>
+    <div class="card"><div class="wrap"><table id="vig-table"></table></div></div>
+  </section>
+  <section id="about" class="tab">
+    <div class="card prose" id="about-body"></div>
+  </section>
+</main>
+<footer>Odds are taken from public feeds and can be wrong or out of date. Always confirm the price at the sportsbook. For information only, not betting advice. Gamble responsibly (21+, 1-800-GAMBLER).</footer>
+<script src="app.js"></script>
+</body>
+</html>
