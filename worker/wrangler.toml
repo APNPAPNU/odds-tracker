@@ -1,0 +1,9 @@
+name = "odds-tracker-api"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+workers_dev = true
+
+# internal fan-out: each part runs as its own invocation (own CPU budget)
+[[services]]
+binding = "SELF"
+service = "odds-tracker-api"

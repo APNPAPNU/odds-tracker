@@ -44,3 +44,4 @@ footer{max-width:1100px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:v
 #refresh.ok{background:#13834a}#refresh.err{background:#b42318}
 #refresh.spin .ic{display:inline-block;animation:sp .8s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
 .when{white-space:nowrap}.when b{color:var(--ink)}
+.src{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11.5px;font-weight:700;margin-right:4px;background:#2a3a5e;color:#cfd8ea}.src.live{background:#13834a;color:#fff}.werr{color:#ffb4a8}

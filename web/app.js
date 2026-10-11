@@ -42,20 +42,44 @@ function showTab() {
 }
 window.addEventListener("hashchange", showTab);
 
-// ---------- data
-let lastLoad = 0, timer = null;
-async function load() {
-  const bust = "?t=" + Date.now();
-  lastLoad = Date.now();
+// ---------- data: live Worker first (every 15 s), GitHub-published files as backup
+const WORKER_URL = ((window.OT_CONFIG || {}).workerUrl || "").replace(/\/+$/, "");
+let lastLoad = 0, timer = null, SRC = "", workerError = "";
+function applyData(meta, arbs, ev, vig, src) {
+  RAW = {arbs, ev}; D = {meta, arbs, ev, vig}; SRC = src;
+  applyTimeGuard(); renderAll();
+}
+async function getJSON(url, ms) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), ms);
   try {
-    const [meta, arbs, ev, vig] = await Promise.all(["meta", "arbs", "ev", "vig"].map(n =>
-      fetch(`data/${n}.json${bust}`, {cache: "no-store"}).then(r => { if (!r.ok) throw new Error(n + " " + r.status); return r.json(); })));
-    RAW = {arbs, ev};
-    D = {meta, arbs, ev, vig};
-    applyTimeGuard();
-    renderAll();
-    return true;
-  } catch (e) {
+    const r = await fetch(url, {cache: "no-store", signal: ctl.signal});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+async function loadWorker() {
+  const j = await getJSON(`${WORKER_URL}/v1/odds`, 10000);
+  if (!j || !j.generated_at || !j.meta) throw new Error(j && j.error ? j.error : "bad response");
+  workerError = "";
+  applyData(j.meta, j.arbs || [], j.ev || [], j.vig || [], "live");
+}
+async function loadGithub(force) {
+  const bust = "?t=" + Date.now();
+  const meta = await getJSON(`data/meta.json${bust}`, 10000);
+  if (!force && SRC === "github" && D.meta && meta.generated_utc === D.meta.generated_utc) return;   // nothing new
+  const [arbs, ev, vig] = await Promise.all(["arbs", "ev", "vig"].map(n => getJSON(`data/${n}.json${bust}`, 10000)));
+  applyData(meta, arbs, ev, vig, "github");
+}
+async function load(force = true) {
+  lastLoad = Date.now();
+  if (WORKER_URL) {
+    try { await loadWorker(); return true; }
+    catch (e) { workerError = e.name === "AbortError" ? "timed out" : e.message; }
+    // keep very recent live data rather than swapping to older backup data
+    if (SRC === "live" && D.meta && Date.now() - Date.parse(D.meta.generated_utc) < 60000) { renderUpdated(); return true; }
+  }
+  try { await loadGithub(force || SRC !== "github"); return true; }
+  catch (e) {
     $("#upd").textContent = "Couldn't load data (" + e.message + "). Retrying in 15 s.";
     $("#upd").classList.add("old");
     return false;
@@ -63,8 +87,8 @@ async function load() {
 }
 function ageText() {
   if (!D.meta) return "";
-  const m = Math.round((Date.now() - Date.parse(D.meta.generated_utc)) / 60000);
-  return m < 1 ? "data just published" : `data ${m} min old`;
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(D.meta.generated_utc)) / 1000));
+  return s < 60 ? `data ${s}s old` : `data ${Math.round(s / 60)} min old`;
 }
 
 // ---------- refresh button + auto-refresh (paused while the tab is hidden)
@@ -75,15 +99,11 @@ btn.addEventListener("click", async () => {
   const ok = await load();
   btn.className = ok ? "ok" : "err";
   btn.querySelector(".lbl").textContent = ok ? `Updated \u00b7 ${ageText()}` : "Failed - retry";
-  startTimer();                       // next auto-refresh a full minute from now
+  startTimer();                       // next auto-refresh 15 s from now
   setTimeout(() => { btn.className = ""; btn.querySelector(".lbl").textContent = "Refresh"; btn.disabled = false; }, 2500);
 });
 async function poll() {
-  lastLoad = Date.now();
-  try {
-    const m = await fetch(`data/meta.json?t=${Date.now()}`, {cache: "no-store"}).then(r => r.ok ? r.json() : null);
-    if (m && (!D.meta || m.generated_utc !== D.meta.generated_utc)) return load();   // new data published
-  } catch (e) { /* keep showing what we have; next poll retries */ }
+  await load(false);
   if (applyTimeGuard()) { renderArbs(); renderEV(); }
   renderUpdated();
 }
@@ -96,15 +116,20 @@ document.addEventListener("visibilitychange", () => {
 });
 function renderAll() { renderUpdated(); renderArbs(); renderEV(); renderVig(); renderAbout(); }
 
+const etClock = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+  hour: "numeric", minute: "2-digit", second: "2-digit"});
 function renderUpdated() {
   const m = D.meta; if (!m) return;
-  const ageMin = Math.round((Date.now() - Date.parse(m.generated_utc)) / 60000);
+  const t = Date.parse(m.generated_utc), ageS = Math.max(0, Math.round((Date.now() - t) / 1000));
+  const age = ageS < 60 ? `${ageS}s ago` : `${Math.round(ageS / 60)} min ago`;
+  const src = SRC === "live" ? "Live server" : "Backup (GitHub, ~5 min)";
   const el = $("#upd");
-  el.textContent = `Updated ${m.generated_et}` + (ageMin >= 1 ? ` (${ageMin} min ago)` : " (just now)");
-  el.classList.toggle("old", ageMin > 15);
+  el.innerHTML = `<span class="src ${SRC}">${src}</span> Updated ${esc(etClock.format(t))} ET (${age})`
+    + (WORKER_URL && SRC !== "live" && workerError ? ` <span class="werr">live server unavailable: ${esc(workerError)}</span>` : "");
+  el.classList.toggle("old", ageS > (SRC === "live" ? 120 : 900));
   $("#n-arb").textContent = D.arbs.length; $("#n-ev").textContent = D.ev.length;
 }
-setInterval(renderUpdated, 30000);
+setInterval(renderUpdated, 5000);
 
 // ---------- arbitrage
 function money(x) { return "$" + x.toFixed(2); }
@@ -224,7 +249,7 @@ function renderAbout() {
     <p>${esc(m.generated_et || "")}. Games matched to Pinnacle: ${esc((m.pinnacle_match || []).join(", ") || "none")}.
     Markets with a Pinnacle line: ${cov.pinnacle_markets ?? "-"} of ${cov.markets ?? "-"}.</p>
     <h3>Caveats</h3>
-    <p>New data is published about every 5 minutes (GitHub can delay that). This page checks for it every 15 seconds while it is open. Games that have started show a LIVE tag and stay listed for up to 4 hours. Lines flagged <span class="pill red">verify before betting</span>
+    <p>While this page is open it pulls fresh odds from the live server every 15 seconds (the server caches for about 15 seconds). If the live server is down, it falls back to backup data published by GitHub about every 5 minutes. The header shows which source and how old the data is. Games that have started show a LIVE tag and stay listed for up to 4 hours. Lines flagged <span class="pill red">verify before betting</span>
     differ a lot from the other books. Limits, geography and promo terms can stop a bet, so always confirm before placing it.</p>`;
 }
 
