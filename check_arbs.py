@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--prune-only", action="store_true")
     ap.add_argument("--min-profit", type=float, default=0.5)
     ap.add_argument("--include-stale", action="store_true")
+    ap.add_argument("--include-live", action="store_true", help="also report arbs on games already in progress")
     ap.add_argument("--keep-hours", type=float, default=48)
     a = ap.parse_args()
     now = datetime.now(timezone.utc)
@@ -70,10 +71,11 @@ def main():
     if a.prune_only:
         print(json.dumps({"pruned": pruned})); return
     new = [x for x in current.values() if x["id"] not in notified
-           and x["profit_pct"] >= a.min_profit and (a.include_stale or not x["stale_warning"])]
+           and x["profit_pct"] >= a.min_profit and (a.include_stale or not x["stale_warning"])
+           and (a.include_live or not x.get("live"))]
     skipped = [{"id": x["id"], "game": x["game"], "profit_pct": x["profit_pct"],
                 "reason": "already notified" if x["id"] in notified else
-                          "stale leg" if x["stale_warning"] else "below min profit"}
+                          "stale leg" if x["stale_warning"] else "live game" if x.get("live") else "below min profit"}
                for x in current.values() if x not in new]
     print(json.dumps({"generated_et": arbs.get("generated_et"), "new_count": len(new), "new": new,
                       "skipped": skipped, "pruned": pruned}, indent=1))
