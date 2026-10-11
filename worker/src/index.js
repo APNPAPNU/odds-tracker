@@ -41,9 +41,15 @@ const fmtG = x => String(Number(x));                     // python %g for half-p
 const fmtSigned = x => (x > 0 ? "+" : "") + fmtG(x);     // python %+g
 const etParts = new Intl.DateTimeFormat("en-US", { timeZone: ET_TZ, weekday: "short", month: "short", day: "numeric",
   hour: "numeric", minute: "2-digit", hour12: true });
+const etCache = new Map();
 function et(ms) {
+  let v = etCache.get(ms);
+  if (v) return v;
   const p = Object.fromEntries(etParts.formatToParts(new Date(ms)).map(x => [x.type, x.value]));
-  return `${p.weekday} ${p.month} ${p.day} ${p.hour}:${p.minute} ${p.dayPeriod} ET`;
+  v = `${p.weekday} ${p.month} ${p.day} ${p.hour}:${p.minute} ${p.dayPeriod} ET`;
+  if (etCache.size > 2000) etCache.clear();
+  etCache.set(ms, v);
+  return v;
 }
 const isoZ = ms => new Date(ms).toISOString().slice(0, 19) + "Z";
 const etDate = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: ET_TZ, year: "numeric", month: "2-digit", day: "2-digit" })
@@ -151,26 +157,34 @@ async function partActionNetwork(sports, now) {
 
 // ------------------------------------------------------------------ Pinnacle part
 const pinMatchups = {};   // league -> {ts, games}
-async function partPinnacle(sports, now) {
+// Pinnacle game list (teams/start) for one league; parsed in its own invocation and cached 10 min
+async function partPinMatchups(sp, now) {
+  const lg = PIN_LEAGUES[sp];
+  let mu = pinMatchups[lg];
+  if (mu && now - mu.ts <= MATCHUP_TTL_MS) return mu;
+  const games = {};
+  for (const m of pickTopLevel(await getText(`${PIN_API}/leagues/${lg}/matchups`), ['\n    "type": "matchup"', '\n    "parentId": null'])) {
+    if (m.type !== "matchup" || m.parentId || m.isLive || (m.units || "Regular") !== "Regular") continue;
+    const side = {};
+    for (const p of m.participants || []) side[p.alignment] = p.name;
+    if (!side.home || !side.away || !m.startTime) continue;
+    games[m.id] = { home: side.home, away: side.away, start: Date.parse(m.startTime) };
+  }
+  return (pinMatchups[lg] = { ts: now, games });
+}
+async function pinGames(sp, now, env) {
+  const mu = pinMatchups[PIN_LEAGUES[sp]];
+  if (mu && now - mu.ts <= MATCHUP_TTL_MS) return mu;
+  const r = await callPart(env, `pinmu-${sp}`);
+  if (!r.ok) throw new Error(r.error);
+  return (pinMatchups[PIN_LEAGUES[sp]] = r.data);
+}
+async function partPinnacle(sports, now, env) {
   const out = {}, errors = [];
   await Promise.all(sports.map(async sp => {
     const lg = PIN_LEAGUES[sp];
     try {
-      let mu = pinMatchups[lg];
-      const needMu = !mu || now - mu.ts > MATCHUP_TTL_MS;
-      const [muText, mkText] = await Promise.all([needMu ? getText(`${PIN_API}/leagues/${lg}/matchups`) : null,
-                                                  getText(`${PIN_API}/leagues/${lg}/markets/straight`)]);
-      if (needMu) {
-        const games = {};
-        for (const m of pickTopLevel(muText, ['\n    "type": "matchup"', '\n    "parentId": null'])) {
-          if (m.type !== "matchup" || m.parentId || m.isLive || (m.units || "Regular") !== "Regular") continue;
-          const side = {};
-          for (const p of m.participants || []) side[p.alignment] = p.name;
-          if (!side.home || !side.away || !m.startTime) continue;
-          games[m.id] = { home: side.home, away: side.away, start: Date.parse(m.startTime) };
-        }
-        mu = pinMatchups[lg] = { ts: now, games };
-      }
+      const [mu, mkText] = await Promise.all([pinGames(sp, now, env), getText(`${PIN_API}/leagues/${lg}/markets/straight`)]);
       const g = {};
       for (const id in mu.games) g[id] = Object.assign({}, mu.games[id], { h2h: null, spreads: {}, totals: {} });
       for (const k of pickTopLevel(mkText, ['\n    "period": 0,'],
@@ -241,6 +255,30 @@ const lineKey = (mkey, o, home) => mkey === "h2h" ? null : mkey === "totals" ? N
 const outcomeLabel = (mkey, name, point) => point == null ? name : mkey === "spreads" ? `${name} ${fmtSigned(Number(point))}` : `${name} ${fmtG(Number(point))}`;
 const sum = a => a.reduce((x, y) => x + y, 0);
 
+async function pushArb(arbs, ev, mkey, lk, names, best, bestHold, game, startIso, startEt, live) {
+        const inv = Object.fromEntries(names.map(n => [n, 1 / toDecimal(best[n][1][best[n][0]].price)]));
+        const s = sum(Object.values(inv));
+        const legs = []; let staleAny = false;
+        for (const n of names) {
+          const [bb, quotes] = best[n], q = quotes[bb];
+          const others = Object.entries(quotes).filter(([b]) => b !== bb).map(([, x]) => implied(x.price));
+          const cons = others.length ? sum(others) / others.length : null;
+          const dev = cons != null ? (cons - implied(q.price)) * 100 : null;
+          const stale = dev != null && dev > CFG.stale_pp; staleAny ||= stale;
+          legs.push({ outcome: outcomeLabel(mkey, n, q.point), book: bb, odds: fmtOdds(q.price),
+                      decimal: Math.round(toDecimal(q.price) * 1e4) / 1e4, stake_usd: r2(100 * inv[n] / s),
+                      other_books_avg_odds: cons ? fmtOdds(toAmerican(cons)) : "n/a", deviation_pp: dev != null ? r2(dev) : null,
+                      stale, line_updated: q.updated, link: q.link || bookLink(bb, ev.sport),
+                      link_type: q.link ? "event" : "sportsbook/league page" });
+        }
+        const lkStr = lk === null ? "None" : Number.isInteger(lk) ? (Object.is(lk, -0) ? "-0.0" : lk.toFixed(1)) : String(lk);   // python str(float)
+        const sig = `${ev.id}|${mkey}|${lkStr}|` + legs.map(l => `${l.outcome}@${l.book}`).join("|");
+        arbs.push({ id: (await sha1hex(sig)).slice(0, 16), price_id: (await sha1hex(sig + "|" + legs.map(l => l.odds).join("|"))).slice(0, 16),
+                    sport: ev.sport.toUpperCase(), game, game_id: ev.id, start_utc: startIso, start_et: startEt, market: MKT[mkey], line: lk,
+                    profit_pct: r2((1 / s - 1) * 100), best_available_hold_pct: r2(bestHold), total_stake_usd: 100, payout_usd: r2(100 / s),
+                    stale_warning: staleAny ? "verify before betting" : "", live, legs });
+      }
+
 async function analyse(events, now) {
   const valueRows = [], arbs = [], bookVigs = {}, vigByMarket = {}, vigBySport = {};
   const cov = { markets: 0, sharp_markets: 0, pinnacle_markets: 0, games: 0, sharp_games: 0, sharp_rejected: 0, stale_dropped: 0 };
@@ -278,6 +316,13 @@ async function analyse(events, now) {
         best[n] = [bb, quotes];
       }
       const bestHold = names.length >= 2 ? (sum(names.map(n => implied(best[n][1][best[n][0]].price))) - 1) * 100 : null;
+      // CPU saver (same output): fair price / EV / coverage only matter when some outcome has >= min_books quotes
+      const maxQuotes = Math.max(...names.map(n => Object.keys(best[n][1]).length));
+      if (maxQuotes < CFG.min_books) {
+        if (bestHold != null && bestHold < 0 && new Set(names.map(n => best[n][0])).size >= 2)
+          await pushArb(arbs, ev, mkey, lk, names, best, bestHold, game, startIso, startEt, live);
+        continue;
+      }
 
       // fair price: weighted average of every book's own no-vig line
       const sharpFair = {}, sharpPx = {}; let altUsed = false, skipped = 0;
@@ -359,29 +404,8 @@ async function analyse(events, now) {
         });
       }
 
-      if (bestHold != null && bestHold < 0 && new Set(names.map(n => best[n][0])).size >= 2) {
-        const inv = Object.fromEntries(names.map(n => [n, 1 / toDecimal(best[n][1][best[n][0]].price)]));
-        const s = sum(Object.values(inv));
-        const legs = []; let staleAny = false;
-        for (const n of names) {
-          const [bb, quotes] = best[n], q = quotes[bb];
-          const others = Object.entries(quotes).filter(([b]) => b !== bb).map(([, x]) => implied(x.price));
-          const cons = others.length ? sum(others) / others.length : null;
-          const dev = cons != null ? (cons - implied(q.price)) * 100 : null;
-          const stale = dev != null && dev > CFG.stale_pp; staleAny ||= stale;
-          legs.push({ outcome: outcomeLabel(mkey, n, q.point), book: bb, odds: fmtOdds(q.price),
-                      decimal: Math.round(toDecimal(q.price) * 1e4) / 1e4, stake_usd: r2(100 * inv[n] / s),
-                      other_books_avg_odds: cons ? fmtOdds(toAmerican(cons)) : "n/a", deviation_pp: dev != null ? r2(dev) : null,
-                      stale, line_updated: q.updated, link: q.link || bookLink(bb, ev.sport),
-                      link_type: q.link ? "event" : "sportsbook/league page" });
-        }
-        const lkStr = lk === null ? "None" : Number.isInteger(lk) ? (Object.is(lk, -0) ? "-0.0" : lk.toFixed(1)) : String(lk);   // python str(float)
-        const sig = `${ev.id}|${mkey}|${lkStr}|` + legs.map(l => `${l.outcome}@${l.book}`).join("|");
-        arbs.push({ id: (await sha1hex(sig)).slice(0, 16), price_id: (await sha1hex(sig + "|" + legs.map(l => l.odds).join("|"))).slice(0, 16),
-                    sport: ev.sport.toUpperCase(), game, game_id: ev.id, start_utc: startIso, start_et: startEt, market: MKT[mkey], line: lk,
-                    profit_pct: r2((1 / s - 1) * 100), best_available_hold_pct: r2(bestHold), total_stake_usd: 100, payout_usd: r2(100 / s),
-                    stale_warning: staleAny ? "verify before betting" : "", live, legs });
-      }
+      if (bestHold != null && bestHold < 0 && new Set(names.map(n => best[n][0])).size >= 2)
+        await pushArb(arbs, ev, mkey, lk, names, best, bestHold, game, startIso, startEt, live);
     }
   }
   arbs.sort((a, b) => b.profit_pct - a.profit_pct);
@@ -391,16 +415,44 @@ async function analyse(events, now) {
     book: b, avg_vig_pct: avg(v), markets: v.length,
     moneyline: avg(vigByMarket[b].moneyline), spread: avg(vigByMarket[b].spread), total: avg(vigByMarket[b].total),
     by_sport: Object.fromEntries(Object.entries(vigBySport[b]).map(([s, x]) => [s, avg(x)])) }));
-  return { arbs, ev: ev.slice(0, 500), vig, cov, lines: valueRows.length };
+  const agg = v => [sum(v), v.length];
+  const vigRaw = Object.fromEntries(Object.entries(bookVigs).map(([b, v]) => [b, { all: agg(v),
+    m: Object.fromEntries(Object.entries(vigByMarket[b]).map(([k, x]) => [k, agg(x)])),
+    s: Object.fromEntries(Object.entries(vigBySport[b]).map(([k, x]) => [k, agg(x)])) }]));
+  return { arbs, ev: ev.slice(0, 500), vig, vigRaw, cov, lines: valueRows.length };
 }
 
 // ------------------------------------------------------------------ orchestration
-const PARTS = { "an-nfl": ["an", ["nfl"]], "an-ncaaf": ["an", ["ncaaf"]], "an-daily": ["an", DAILY],
-                "pin-nfl": ["pin", ["nfl"]], "pin-rest": ["pin", ["ncaaf", "nba", "mlb", "nhl"]] };
+// Each "part" runs as its own invocation (service binding to this Worker) so every one stays small in CPU:
+//   sport-<g>: Action Network fetch + attach Pinnacle + analyse for a group of sports
+//   pin-<g>:   Pinnacle full-game markets for that group;  pinmu-<sport>: Pinnacle game list (cached 10 min)
+const GROUPS = { nfl: ["nfl"], ncaaf: ["ncaaf"], daily: DAILY };
+const PARTS = {};
+for (const [g, sp] of Object.entries(GROUPS)) { PARTS[`sport-${g}`] = ["sport", sp, g]; PARTS[`pin-${g}`] = ["pin", sp, g]; }
+for (const sp of Object.keys(PIN_LEAGUES)) PARTS[`pinmu-${sp}`] = ["pinmu", [sp]];
 
-async function runPart(name, now) {
-  const [kind, sports] = PARTS[name];
-  return kind === "an" ? partActionNetwork(sports, now) : partPinnacle(sports, now);
+async function partSport(group, sports, now, env) {
+  const [an, pin] = await Promise.all([partActionNetwork(sports, now), callPart(env, `pin-${group}`)]);
+  const warnings = [], pinMatch = [];
+  if (an.failed.length) warnings.push(`Action Network failed for ${an.failed.join(",")}: ${an.errors.join("; ")}`);
+  if (!pin.ok) warnings.push(`Pinnacle ${group}: ${pin.error} - using retail-only fair price`);
+  else {
+    for (const e of pin.data.errors) warnings.push(`Pinnacle ${e} - using retail-only fair price`);
+    for (const [sp, games] of Object.entries(pin.data.leagues)) {
+      const m = attachPinnacle(an.events, sp, games);
+      pinMatch.push(`${sp} ${m}/${an.events.filter(e => e.sport === sp).length}`);
+    }
+  }
+  const out = await analyse(an.events, Date.now());
+  return { arbs: out.arbs, ev: out.ev, vigRaw: out.vigRaw, cov: out.cov, lines: out.lines, games: an.events.length,
+           failed: an.failed, warnings, pinMatch };
+}
+
+async function runPart(name, now, env) {
+  const [kind, sports, group] = PARTS[name];
+  if (kind === "sport") return partSport(group, sports, now, env);
+  if (kind === "pin") return partPinnacle(sports, now, env);
+  return partPinMatchups(sports[0], now);
 }
 
 async function callPart(env, name) {
@@ -411,44 +463,48 @@ async function callPart(env, name) {
       const r = await env.SELF.fetch(`https://internal/_part/${name}`, { headers: { "x-part-key": env.PART_KEY || "" } });
       if (!r.ok) throw new Error(`part ${name} HTTP ${r.status}`);
       data = await r.json();
-    } else data = await runPart(name, Date.now());   // no binding (local dev): run inline
+    } else data = await runPart(name, Date.now(), env);   // no binding (local tests): run inline
     return { ok: true, data, ms: Date.now() - t0 };
   } catch (e) { return { ok: false, error: String(e.message || e), ms: Date.now() - t0 }; }
 }
 
 async function build(env) {
   const t0 = Date.now();
-  const names = Object.keys(PARTS);
-  const results = Object.fromEntries((await Promise.all(names.map(n => callPart(env, n)))).map((r, i) => [names[i], r]));
+  const names = Object.keys(GROUPS).map(g => `sport-${g}`);
+  const res = await Promise.all(names.map(n => callPart(env, n)));
   const now = Date.now();
-  const events = [], warnings = [];
-  for (const n of ["an-nfl", "an-ncaaf", "an-daily"]) {
-    const r = results[n];
-    if (!r.ok) { warnings.push(`${n}: ${r.error}`); continue; }
-    events.push(...r.data.events);
-    if (r.data.failed.length) warnings.push(`Action Network failed for ${r.data.failed.join(",")}: ${r.data.errors.join("; ")}`);
-  }
-  if (!events.length && warnings.length) throw new Error("Action Network unavailable: " + warnings.join(" | "));
-  const pinMatch = [];
-  for (const n of ["pin-nfl", "pin-rest"]) {
-    const r = results[n];
-    if (!r.ok) { warnings.push(`Pinnacle ${n}: ${r.error} - using retail-only fair price`); continue; }
-    for (const e of r.data.errors) warnings.push(`Pinnacle ${e} - using retail-only fair price`);
-    for (const [sp, games] of Object.entries(r.data.leagues)) {
-      const m = attachPinnacle(events, sp, games);
-      pinMatch.push(`${sp} ${m}/${events.filter(e => e.sport === sp).length}`);
+  const arbs = [], ev = [], vigRaw = {}, warnings = [], pinMatch = [];
+  const cov = { markets: 0, sharp_markets: 0, pinnacle_markets: 0, games: 0, sharp_games: 0, sharp_rejected: 0, stale_dropped: 0 };
+  let lines = 0, games = 0, anOk = 0;
+  res.forEach((r, i) => {
+    if (!r.ok) { warnings.push(`${names[i]}: ${r.error}`); return; }
+    const d = r.data;
+    if (d.failed.length < GROUPS[names[i].slice(6)].length) anOk++;
+    arbs.push(...d.arbs); ev.push(...d.ev); warnings.push(...d.warnings); pinMatch.push(...d.pinMatch);
+    lines += d.lines; games += d.games;
+    for (const k in cov) cov[k] += d.cov[k] || 0;
+    for (const [b, v] of Object.entries(d.vigRaw)) {
+      const t = vigRaw[b] ||= { all: [0, 0], m: {}, s: {} };
+      t.all[0] += v.all[0]; t.all[1] += v.all[1];
+      for (const k of ["m", "s"]) for (const [x, [sm, n]] of Object.entries(v[k])) { const y = t[k][x] ||= [0, 0]; y[0] += sm; y[1] += n; }
     }
-  }
-  const out = await analyse(events, now);
-  const generated = new Date(now);
+  });
+  if (!anOk) throw new Error("Action Network unavailable: " + warnings.join(" | "));
+  arbs.sort((a, b) => b.profit_pct - a.profit_pct);
+  ev.sort((a, b) => b.ev_vs_fair_pct - a.ev_vs_fair_pct);
+  const avg = x => x && x[1] ? r2(x[0] / x[1]) : null;
+  const vig = Object.entries(vigRaw).sort((a, b) => a[1].all[0] / a[1].all[1] - b[1].all[0] / b[1].all[1]).map(([b, v]) => ({
+    book: b, avg_vig_pct: avg(v.all), markets: v.all[1], moneyline: avg(v.m.moneyline), spread: avg(v.m.spread), total: avg(v.m.total),
+    by_sport: Object.fromEntries(Object.entries(v.s).map(([k, x]) => [k, avg(x)])) }));
+  const generated = new Date(now).toISOString();
   return {
-    generated_at: generated.toISOString(),
-    meta: { generated_utc: generated.toISOString(), generated_et: et(now), source: "Cloudflare Worker (live: Action Network + Pinnacle)",
+    generated_at: generated,
+    meta: { generated_utc: generated, generated_et: et(now), source: "Cloudflare Worker (live: Action Network + Pinnacle)",
             sharp_source: "Pinnacle public guest API (reference only)", pinnacle_match: pinMatch, weights: WEIGHTS,
-            stale_guard_pp: CFG.stale_guard_pp, counts: { arbs: out.arbs.length, ev: out.ev.length, books: out.vig.length, games: events.length, lines: out.lines },
-            coverage: out.cov, warnings, cache_ttl_s: TTL_MS / 1000,
-            timings_ms: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.ms])), build_ms: Date.now() - t0 },
-    arbs: out.arbs, ev: out.ev, vig: out.vig,
+            stale_guard_pp: CFG.stale_guard_pp, counts: { arbs: arbs.length, ev: ev.length, books: vig.length, games, lines },
+            coverage: cov, warnings, cache_ttl_s: TTL_MS / 1000,
+            timings_ms: Object.fromEntries(res.map((r, i) => [names[i], r.ms])), build_ms: Date.now() - t0 },
+    arbs, ev: ev.slice(0, 500), vig,
   };
 }
 
@@ -475,7 +531,7 @@ export default {
       if (!env.PART_KEY || req.headers.get("x-part-key") !== env.PART_KEY) return new Response("not found", { status: 404 });
       const name = url.pathname.slice(7);
       if (!PARTS[name]) return new Response("not found", { status: 404 });
-      try { return Response.json(await runPart(name, Date.now())); }
+      try { return Response.json(await runPart(name, Date.now(), env)); }
       catch (e) { return new Response(String(e.message || e), { status: 502 }); }
     }
     const cors = corsHeaders(req);
@@ -493,4 +549,4 @@ export default {
     }
   },
 };
-export const __test = { analyse, attachPinnacle };   // used by the parity test only
+export const __test = { analyse, attachPinnacle, partActionNetwork };   // used by tests only
