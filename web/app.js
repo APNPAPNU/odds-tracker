@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const safeUrl = u => /^https:\/\//i.test(u || "") ? u : "";
-const REFRESH_MS = 15000;            // poll the published data every 15 s while the tab is visible
+const REFRESH_MS = 30000;            // poll every 30 s while the tab is visible
 const LIVE_KEEP_MS = 4 * 3600e3;     // games that started < 4 h ago are kept (live); older ones are hidden
 let D = {meta: null, arbs: [], ev: [], vig: []};
 let RAW = {arbs: [], ev: []}, hiddenStarted = 0;
@@ -42,7 +42,7 @@ function showTab() {
 }
 window.addEventListener("hashchange", showTab);
 
-// ---------- data: live Worker first (every 15 s), GitHub-published files as backup
+// ---------- data: live Worker first (every 30 s), GitHub-published files as backup
 const WORKER_URL = ((window.OT_CONFIG || {}).workerUrl || "").replace(/\/+$/, "");
 let lastLoad = 0, timer = null, SRC = "", workerError = "";
 function applyData(meta, arbs, ev, vig, src) {
@@ -76,11 +76,11 @@ async function load(force = true) {
     try { await loadWorker(); return true; }
     catch (e) { workerError = e.name === "AbortError" ? "timed out" : e.message; }
     // keep very recent live data rather than swapping to older backup data
-    if (SRC === "live" && D.meta && Date.now() - Date.parse(D.meta.generated_utc) < 60000) { renderUpdated(); return true; }
+    if (SRC === "live" && D.meta && Date.now() - Date.parse(D.meta.generated_utc) < 90000) { renderUpdated(); return true; }
   }
   try { await loadGithub(force || SRC !== "github"); return true; }
   catch (e) {
-    $("#upd").textContent = "Couldn't load data (" + e.message + "). Retrying in 15 s.";
+    $("#upd").textContent = "Couldn't load data (" + e.message + "). Retrying in 30 s.";
     $("#upd").classList.add("old");
     return false;
   }
@@ -99,7 +99,7 @@ btn.addEventListener("click", async () => {
   const ok = await load();
   btn.className = ok ? "ok" : "err";
   btn.querySelector(".lbl").textContent = ok ? `Updated \u00b7 ${ageText()}` : "Failed - retry";
-  startTimer();                       // next auto-refresh 15 s from now
+  startTimer();                       // next auto-refresh 30 s from now
   setTimeout(() => { btn.className = ""; btn.querySelector(".lbl").textContent = "Refresh"; btn.disabled = false; }, 2500);
 });
 async function poll() {
@@ -249,7 +249,7 @@ function renderAbout() {
     <p>${esc(m.generated_et || "")}. Games matched to Pinnacle: ${esc((m.pinnacle_match || []).join(", ") || "none")}.
     Markets with a Pinnacle line: ${cov.pinnacle_markets ?? "-"} of ${cov.markets ?? "-"}.</p>
     <h3>Caveats</h3>
-    <p>While this page is open it pulls fresh odds from the live server every 15 seconds (the server caches for about 15 seconds). If the live server is down, it falls back to backup data published by GitHub about every 5 minutes. The header shows which source and how old the data is. Games that have started show a LIVE tag and stay listed for up to 4 hours. Lines flagged <span class="pill red">verify before betting</span>
+    <p>While this page is open it pulls fresh odds from the live server every 30 seconds (the server caches for about 27 seconds). If the live server is down, it falls back to backup data published by GitHub about every 5 minutes. The header shows which source and how old the data is. Games that have started show a LIVE tag and stay listed for up to 4 hours. Lines flagged <span class="pill red">verify before betting</span>
     differ a lot from the other books. Limits, geography and promo terms can stop a bet, so always confirm before placing it.</p>`;
 }
 

@@ -10,7 +10,7 @@ On identical input it produces the same results as the Python script.
 
 - **Not a proxy:** it calls fixed upstream URLs only; nothing from the request is forwarded upstream.
 - **CORS:** only `https://apnpapnu.github.io` and localhost are allowed.
-- **Caching:** each build is held in memory for 12 s, so a page polling every 15 s gets fresh data, and many tabs don't multiply upstream calls.
+- **Caching:** each build is held in memory for 27 s, so a page polling every 30 s gets fresh data, and many tabs don't multiply upstream calls.
 - **Free-plan CPU:** parsing is split across five internal invocations (service binding to itself) so each stays within the free plan's 10 ms CPU limit:
   - Action Network: NFL, NCAAF, and NBA/MLB/NHL
   - Pinnacle: NFL, and the other leagues

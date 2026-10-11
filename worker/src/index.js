@@ -6,7 +6,7 @@
 
 const ORIGINS = ["https://apnpapnu.github.io"];
 const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
-const TTL_MS = 12000;               // payload freshness (12 s so a client polling every 15 s always gets a new build)
+const TTL_MS = 27000;               // payload freshness (27 s so a client polling every 30 s always gets a new build)
 const MATCHUP_TTL_MS = 10 * 60e3;   // Pinnacle game list (teams/start times) changes slowly
 const CARRY_MS = 3 * 60e3;          // keep an Action Network book line seen in the last 3 min (feed returns random subsets)
 const AN_PASSES = 2;
@@ -543,7 +543,7 @@ export default {
       const c = await getPayload(env);
       const age = Math.floor((Date.now() - c.ts) / 1000);
       return new Response(c.body, { headers: { ...cors, "content-type": "application/json; charset=utf-8",
-        "cache-control": `public, max-age=${Math.max(0, 12 - age)}`, "x-data-age": String(age) } });
+        "cache-control": `public, max-age=${Math.max(0, 27 - age)}`, "x-data-age": String(age) } });
     } catch (e) {
       return new Response(JSON.stringify({ error: String(e.message || e) }), { status: 503, headers: { ...cors, "content-type": "application/json" } });
     }

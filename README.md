@@ -8,7 +8,7 @@ A mobile-friendly static site that compares public sportsbook odds (NFL, NCAAF, 
 - **Positive EV**: lines priced better than a weighted no-vig fair price. Pinnacle is used as a sharp reference. You can filter by sport, minimum EV, maximum odds, market and confidence.
 - **Vig by Book**: average hold per book, overall and by market type and sport.
 
-While the page is open it checks for newly published data every 15 seconds. New data is published about every 5 minutes. Games that have already started stay listed with a LIVE tag for up to 4 hours after kickoff. Lines that differ sharply from the other books are marked **verify before betting**.
+While the page is open it pulls fresh odds from the live server (Cloudflare Worker) every 30 seconds, falling back to data GitHub publishes about every 5 minutes. Games that have already started stay listed with a LIVE tag for up to 4 hours after kickoff. Lines that differ sharply from the other books are marked **verify before betting**.
 
 ## How it works
 
