@@ -1,0 +1,58 @@
+name: Update odds data
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # GitHub may delay or skip scheduled runs under load
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-odds
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install --quiet requests
+
+      - name: Fetch odds (Action Network + Pinnacle reference)
+        # exits 2 if the Action Network feed fails, so nothing is published and the site keeps the previous data
+        run: python odds_compare.py --web-json _site/data --site-dir /tmp/site --out /tmp/odds.csv --top 5
+
+      - name: Feed check
+        run: |
+          python - <<'PY'
+          import json
+          m = json.load(open("_site/data/meta.json"))
+          print("generated:", m["generated_et"])
+          print("counts:", m["counts"])
+          print("pinnacle matched:", m["pinnacle_match"])
+          print("coverage:", m["coverage"])
+          PY
+
+      - name: Publish to gh-pages (single force-pushed commit, no history growth)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp -r web/. _site/
+          touch _site/.nojekyll
+          cd _site
+          git init -q -b gh-pages
+          git config user.name "odds-tracker-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "Data update $(date -u +%Y-%m-%dT%H:%MZ) (GitHub Actions)"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

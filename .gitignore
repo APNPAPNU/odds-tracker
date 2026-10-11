@@ -1,0 +1,8 @@
+__pycache__/
+output/
+site/
+_site/
+notified_arbs.json
+drive_ids.json
+*.bak
+web/data/
