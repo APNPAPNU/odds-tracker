@@ -43,3 +43,4 @@ footer{max-width:1100px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:v
 #refresh:active{transform:scale(.97)}#refresh[disabled]{opacity:.75;cursor:default}
 #refresh.ok{background:#13834a}#refresh.err{background:#b42318}
 #refresh.spin .ic{display:inline-block;animation:sp .8s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.when{white-space:nowrap}.when b{color:var(--ink)}

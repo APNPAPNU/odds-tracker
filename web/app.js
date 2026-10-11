@@ -2,8 +2,35 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const safeUrl = u => /^https:\/\//i.test(u || "") ? u : "";
-const REFRESH_MS = 60000;
+const REFRESH_MS = 15000;            // poll the published data every 15 s while the tab is visible
+const LIVE_KEEP_MS = 4 * 3600e3;     // games that started < 4 h ago are kept (live); older ones are hidden
 let D = {meta: null, arbs: [], ev: [], vig: []};
+let RAW = {arbs: [], ev: []}, hiddenStarted = 0;
+
+// ---------- client-side guard: never show a game whose start time has passed (data may be minutes old)
+const startMs = x => {
+  const s = x.start_iso || x.start_utc || "";
+  const t = Date.parse(/Z|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(" ", "T") + "Z");   // naive strings are UTC
+  return isNaN(t) ? null : t;
+};
+const etDay = ms => new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"}).format(ms);
+function whenET(x) {
+  const t = startMs(x); if (t === null) return esc(x.start_et);
+  const d = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric"}).format(t);
+  const h = new Intl.DateTimeFormat("en-US", {timeZone: "America/New_York", hour: "numeric", minute: "2-digit"}).format(t);
+  const rel = etDay(t) === etDay(Date.now()) ? "Today" : etDay(t) === etDay(Date.now() + 864e5) ? "Tomorrow" : "";
+  const live = t <= Date.now() ? ' <span class="pill red">LIVE - lines move fast</span>' : "";
+  return `<span class="when">${rel ? `<b>${rel}</b> &middot; ` : ""}${esc(d)}, ${esc(h)} ET</span>${live}`;
+}
+function applyTimeGuard() {
+  const now = Date.now(), ok = x => { const t = startMs(x); return t === null || t > now - LIVE_KEEP_MS; };
+  const arbs = RAW.arbs.filter(ok), ev = RAW.ev.filter(ok);
+  const changed = arbs.length !== D.arbs.length || ev.length !== D.ev.length;
+  hiddenStarted = (RAW.arbs.length - arbs.length) + (RAW.ev.length - ev.length);
+  D.arbs = arbs; D.ev = ev;
+  return changed;
+}
+setInterval(() => { if (applyTimeGuard()) { renderArbs(); renderEV(); renderUpdated(); } }, 30000);
 let stakes = JSON.parse(localStorage.getItem("ot_stakes") || "{}");
 let pendingArbRender = false;
 
@@ -23,11 +50,13 @@ async function load() {
   try {
     const [meta, arbs, ev, vig] = await Promise.all(["meta", "arbs", "ev", "vig"].map(n =>
       fetch(`data/${n}.json${bust}`, {cache: "no-store"}).then(r => { if (!r.ok) throw new Error(n + " " + r.status); return r.json(); })));
+    RAW = {arbs, ev};
     D = {meta, arbs, ev, vig};
+    applyTimeGuard();
     renderAll();
     return true;
   } catch (e) {
-    $("#upd").textContent = "Couldn't load data (" + e.message + "). Retrying in 1 min.";
+    $("#upd").textContent = "Couldn't load data (" + e.message + "). Retrying in 15 s.";
     $("#upd").classList.add("old");
     return false;
   }
@@ -49,11 +78,20 @@ btn.addEventListener("click", async () => {
   startTimer();                       // next auto-refresh a full minute from now
   setTimeout(() => { btn.className = ""; btn.querySelector(".lbl").textContent = "Refresh"; btn.disabled = false; }, 2500);
 });
-function startTimer() { clearInterval(timer); timer = setInterval(load, REFRESH_MS); }
+async function poll() {
+  lastLoad = Date.now();
+  try {
+    const m = await fetch(`data/meta.json?t=${Date.now()}`, {cache: "no-store"}).then(r => r.ok ? r.json() : null);
+    if (m && (!D.meta || m.generated_utc !== D.meta.generated_utc)) return load();   // new data published
+  } catch (e) { /* keep showing what we have; next poll retries */ }
+  if (applyTimeGuard()) { renderArbs(); renderEV(); }
+  renderUpdated();
+}
+function startTimer() { clearInterval(timer); timer = setInterval(poll, REFRESH_MS); }
 function stopTimer() { clearInterval(timer); timer = null; }
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) { stopTimer(); return; }
-  if (Date.now() - lastLoad >= REFRESH_MS) load(); else renderUpdated();
+  if (Date.now() - lastLoad >= REFRESH_MS) poll(); else renderUpdated();
   startTimer();
 });
 function renderAll() { renderUpdated(); renderArbs(); renderEV(); renderVig(); renderAbout(); }
@@ -78,7 +116,7 @@ function renderArbs() {
   const box = $("#arb-list");
   if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") { pendingArbRender = true; return; }
   pendingArbRender = false;
-  if (!D.arbs.length) { box.innerHTML = `<div class="card empty">No arbitrage opportunities right now. Checked ${esc(D.meta?.generated_et || "")}.</div>`; return; }
+  if (!D.arbs.length) { box.innerHTML = `<div class="card empty">No arbitrage opportunities for upcoming games right now. Checked ${esc(D.meta?.generated_et || "")}.</div>`; return; }
   box.innerHTML = D.arbs.map(a => {
     const total = stakes[a.id] ?? 100, c = calc(a, total);
     const legs = a.legs.map((l, i) => {
@@ -93,7 +131,7 @@ function renderArbs() {
       </div>`;}).join("");
     return `<div class="card arb" data-id="${esc(a.id)}">
       <h3>${esc(a.game)}</h3>
-      <div class="sub"><span class="pill grey">${esc(a.sport)}</span> ${esc(a.start_et)} &middot; ${esc(a.market)}
+      <div class="sub"><span class="pill grey">${esc(a.sport)}</span> ${whenET(a)} &middot; ${esc(a.market)}
         &middot; <span class="pill green">+${a.profit_pct.toFixed(2)}%</span>
         ${a.stale_warning ? '<span class="pill red">&#9888; verify before betting</span>' : ""}</div>
       <div class="calc"><label for="s-${esc(a.id)}">Total stake $</label>
@@ -130,11 +168,12 @@ function renderEV() {
   const rows = D.ev.filter(r => (!sel.value || r.sport === sel.value) && (isNaN(minEv) || r.ev_vs_fair_pct >= minEv)
     && (isNaN(maxOdds) || r.best_odds_num == null || r.best_odds_num <= maxOdds) && (!mkt || r.market === mkt)
     && (!$("#f-high").checked || String(r.confidence).startsWith("high")) && (!$("#f-stale").checked || !r.stale_warning));
-  $("#ev-meta").textContent = `${rows.length} of ${D.ev.length} lines beat the weighted no-vig fair price (Pinnacle x4, other sharp books x2, retail x1).`;
+  $("#ev-meta").textContent = `${rows.length} of ${D.ev.length} lines beat the weighted no-vig fair price (Pinnacle x4, other sharp books x2, retail x1).`
+    + (hiddenStarted ? ` ${hiddenStarted} line(s) for finished games are hidden.` : "");
   $("#ev-list").innerHTML = rows.length ? rows.map(r => {
     const url = safeUrl(r.best_book_link), high = String(r.confidence).startsWith("high");
     return `<div class="card ev">
-      <div><div class="g">${esc(r.sport)} &middot; ${esc(r.game)} &middot; ${esc(r.start_et)}</div>
+      <div><div class="g">${esc(r.sport)} &middot; ${esc(r.game)}</div><div class="g">${whenET(r)}</div>
         <div class="pick">${esc(r.outcome)} <span class="k">${esc(r.market)}</span></div></div>
       <div class="evp">+${r.ev_vs_fair_pct.toFixed(2)}%</div>
       <div class="row">
@@ -185,7 +224,7 @@ function renderAbout() {
     <p>${esc(m.generated_et || "")}. Games matched to Pinnacle: ${esc((m.pinnacle_match || []).join(", ") || "none")}.
     Markets with a Pinnacle line: ${cov.pinnacle_markets ?? "-"} of ${cov.markets ?? "-"}.</p>
     <h3>Caveats</h3>
-    <p>Feeds can lag the books by minutes, and the page refreshes its data every minute. Lines flagged <span class="pill red">verify before betting</span>
+    <p>New data is published about every 5 minutes (GitHub can delay that). This page checks for it every 15 seconds while it is open. Games that have started show a LIVE tag and stay listed for up to 4 hours. Lines flagged <span class="pill red">verify before betting</span>
     differ a lot from the other books. Limits, geography and promo terms can stop a bet, so always confirm before placing it.</p>`;
 }
 

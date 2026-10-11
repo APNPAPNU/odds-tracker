@@ -8,7 +8,9 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: update-odds
@@ -18,6 +20,9 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 6
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +34,7 @@ jobs:
         run: pip install --quiet requests
 
       - name: Fetch odds (Action Network + Pinnacle reference)
-        # exits 2 if the Action Network feed fails, so nothing is published and the site keeps the previous data
+        # exits 2 if the Action Network feed fails, so nothing is deployed and the site keeps the previous data
         run: python odds_compare.py --web-json _site/data --site-dir /tmp/site --out /tmp/odds.csv --top 5
 
       - name: Feed check
@@ -37,22 +42,22 @@ jobs:
           python - <<'PY'
           import json
           m = json.load(open("_site/data/meta.json"))
-          print("generated:", m["generated_et"])
+          print("generated:", m["generated_et"], m["generated_utc"])
           print("counts:", m["counts"])
           print("pinnacle matched:", m["pinnacle_match"])
-          print("coverage:", m["coverage"])
+          ev = json.load(open("_site/data/ev.json")); arbs = json.load(open("_site/data/arbs.json"))
+          print("ev games:", sorted({(r["start_iso"], r["game"]) for r in ev})[:40])
+          print("arb games:", sorted({(a["start_utc"], a["game"]) for a in arbs}))
           PY
 
-      - name: Publish to gh-pages (single force-pushed commit, no history growth)
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble site
         run: |
           cp -r web/. _site/
           touch _site/.nojekyll
-          cd _site
-          git init -q -b gh-pages
-          git config user.name "odds-tracker-bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -qm "Data update $(date -u +%Y-%m-%dT%H:%MZ) (GitHub Actions)"
-          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4

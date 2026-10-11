@@ -24,7 +24,7 @@ Exit codes: 0 ok, 2 data feed failure (previous site/ files are left untouched).
 import argparse, csv, hashlib, html, json, os, sys, tempfile, time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 try:
@@ -169,15 +169,26 @@ def fetch_fixture(sport, args):
         raw = json.load(f)
     return from_oddsapi_events([e for e in raw if e.get("sport_key") == SPORTS[sport][1]], sport)
 
-def fetch_actionnetwork(sport, args):
-    params = {"period": "game", "bookIds": ",".join(str(i) for i in AN_BOOKS)}
+AN_FINISHED = {"complete", "closed", "final", "cancelled", "canceled", "postponed", "abandoned", "suspended"}
+DAILY_SPORTS = {"nba", "mlb", "nhl"}     # AN's default slate for these is one (ET) day; NFL/NCAAF default = the week
+
+def an_dates(sport, args):
+    """Which Action Network slates to request. Dates are ET calendar days (the feed's 'date' is an ET date)."""
     if args.date:
-        params["date"] = args.date.replace("-", "")
+        return [args.date.replace("-", "")]
+    if sport not in DAILY_SPORTS:
+        return [None]                       # default = current week, already covers today + upcoming days
+    today = datetime.now(timezone.utc).astimezone(ET).date()
+    return [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(max(1, args.days))]
+
+def fetch_actionnetwork(sport, args):
+    base = {"period": "game", "bookIds": ",".join(str(i) for i in AN_BOOKS)}
     # The feed ignores bookIds and returns a varying subset of books per request, so make a few
     # requests in parallel and merge each book's line per game (newest 'inserted' wins).
     url = f"https://api.actionnetwork.com/web/v1/scoreboard/{SPORTS[sport][0]}"
-    with ThreadPoolExecutor(max_workers=args.an_passes) as pool:
-        futs = [pool.submit(http_get, url, params) for _ in range(args.an_passes)]
+    reqs = [dict(base, **({"date": d} if d else {})) for d in an_dates(sport, args) for _ in range(args.an_passes)]
+    with ThreadPoolExecutor(max_workers=min(8, len(reqs))) as pool:
+        futs = [pool.submit(http_get, url, params) for params in reqs]
         results, errs = [], []
         for f in futs:
             try:
@@ -202,7 +213,7 @@ def fetch_actionnetwork(sport, args):
                     cur["odds"][have[k]] = o
     out = []
     for g in games.values():
-        if g.get("status") != "scheduled":
+        if str(g.get("status", "")).lower() in AN_FINISHED:     # keep scheduled + in-progress games
             continue
         teams = {t["id"]: t["full_name"] for t in g.get("teams", [])}
         home, away = teams.get(g["home_team_id"], "Home"), teams.get(g["away_team_id"], "Away")
@@ -355,8 +366,11 @@ def analyse(events, args):
     book_vigs = defaultdict(list)
     cov = {"markets": 0, "sharp_markets": 0, "pinnacle_markets": 0, "games": 0, "sharp_games": 0}
     for ev in events:
-        if ev["start"] <= now and not args.include_started:
+        # keep upcoming and live games; drop games that started more than --max-live-hours ago (clearly over).
+        # all datetimes are tz-aware UTC
+        if ev["start"] < now - timedelta(hours=args.max_live_hours) and not args.include_started:
             continue
+        live = ev["start"] <= now
         game = f"{ev['away']} @ {ev['home']}"
         cov["games"] += 1
         cov["sharp_games"] += bool(ev.get("sharp"))
@@ -466,7 +480,8 @@ def analyse(events, args):
                 bdec = to_decimal(bp)
                 value_rows.append({
                     "sport": ev["sport"].upper(), "game": game, "start_et": et(ev["start"]),
-                    "start_utc": ev["start"].strftime("%Y-%m-%d %H:%M"),
+                    "start_utc": ev["start"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "start_iso": ev["start"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "market": MKT[mkey], "outcome": outcome_label(mkey, n, quotes[bb]["point"]),
                     "n_books": len(quotes), "best_book": " / ".join(ties), "best_odds": fmt_odds(bp),
                     "avg_odds": fmt_odds(to_american(avg_p)),
@@ -486,6 +501,7 @@ def analyse(events, args):
                     "market_avg_vig_pct": round(avg_vig, 2) if avg_vig is not None else None,
                     "best_available_hold_pct": round(best_hold, 2) if best_hold is not None else None,
                     "stale_warning": "verify before betting" if stale else "",
+                    "live": live,
                     "best_book_link": quotes[bb]["link"] or book_link(bb, ev["sport"]),
                     "all_books": "; ".join(f"{b} {fmt_odds(q['price'])}" for b, q in
                                            sorted(quotes.items(), key=lambda x: -to_decimal(x[1]["price"]))),
@@ -517,11 +533,11 @@ def analyse(events, args):
                     "id": hashlib.sha1(sig.encode()).hexdigest()[:16],
                     "price_id": hashlib.sha1((sig + "|" + "|".join(l["odds"] for l in legs)).encode()).hexdigest()[:16],
                     "sport": ev["sport"].upper(), "game": game, "game_id": ev["id"],
-                    "start_utc": ev["start"].isoformat(), "start_et": et(ev["start"]),
+                    "start_utc": ev["start"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "start_et": et(ev["start"]),
                     "market": MKT[mkey], "line": lk,
                     "profit_pct": round((1 / s - 1) * 100, 2), "best_available_hold_pct": round(best_hold, 2),
                     "total_stake_usd": 100, "payout_usd": round(100 / s, 2),
-                    "stale_warning": "verify before betting" if stale_any else "", "legs": legs})
+                    "stale_warning": "verify before betting" if stale_any else "", "live": live, "legs": legs})
     value_rows.sort(key=lambda r: r["edge_pp"], reverse=True)
     arbs.sort(key=lambda a: a["profit_pct"], reverse=True)
     ev_rows = sorted([r for r in value_rows if r["ev_vs_fair_pct"] is not None and r["ev_vs_fair_pct"] > 0],
@@ -708,9 +724,9 @@ def write_web_json(d, now, updated, src, arbs, ev_rows, vig_rows, book_avg, args
     dump = lambda name, obj: atomic_write(os.path.join(d, name), json.dumps(obj, separators=(",", ":"), default=str))
     ev_keep = ["sport", "game", "start_et", "start_utc", "market", "outcome", "n_books", "best_book", "best_odds",
                "avg_odds", "novig_fair_odds", "ev_vs_fair_pct", "fair_source", "confidence", "sharp_odds",
-               "pinnacle_fair_odds", "ev_vs_pinnacle_pct", "consensus_fair_odds", "ev_vs_consensus_pct",
+               "pinnacle_fair_odds", "ev_vs_pinnacle_pct", "consensus_fair_odds", "ev_vs_consensus_pct", "live",
                "edge_pp", "best_book_vig_pct", "market_avg_vig_pct", "stale_warning", "best_book_link", "all_books"]
-    ev = [dict({k: r.get(k) for k in ev_keep}, best_odds_num=_num(r["best_odds"])) for r in ev_rows[:500]]
+    ev = [dict({k: r.get(k) for k in ev_keep}, best_odds_num=_num(r["best_odds"]), start_iso=r["start_iso"]) for r in ev_rows[:500]]
     by_book = defaultdict(lambda: defaultdict(list))
     for r in vig_rows:
         by_book[r["book"]][r["market"]].append(r["vig_pct"])
@@ -747,6 +763,9 @@ def main():
     ap.add_argument("--an-passes", type=int, default=4, help="Action Network: parallel requests merged per sport (default 4)")
     ap.add_argument("--regions", default="us"); ap.add_argument("--books", default=None)
     ap.add_argument("--fixture"); ap.add_argument("--include-started", action="store_true")
+    ap.add_argument("--days", type=int, default=2, help="NBA/MLB/NHL: number of ET days to fetch starting today (default 2)")
+    ap.add_argument("--max-live-hours", type=float, default=4.0,
+                    help="keep games that already started for up to this many hours (live), then drop them (default 4)")
     ap.add_argument("--no-sharp", action="store_true", help="skip Pinnacle reference lines (fair = consensus)")
     ap.add_argument("--web-json", default=None, help="also write website data (meta/arbs/ev/vig .json) into this directory")
     ap.add_argument("--weights", default="", help='fair-price weight overrides, e.g. "Pinnacle=5,BetMGM=0.5" (0 = exclude)')
