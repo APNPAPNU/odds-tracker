@@ -38,3 +38,8 @@ tr.best td{background:#f2fbf6}
 .prose{font-size:14.5px}.prose h3{margin:14px 0 4px;font-size:15.5px}.prose code{background:var(--gry);padding:1px 5px;border-radius:5px;font-size:13px}
 footer{max-width:1100px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:var(--mut)}
 @media(min-width:760px){.legs{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}#ev-list{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}}
+.right{display:flex;align-items:center;gap:10px;margin-left:auto}
+#refresh{display:inline-flex;align-items:center;gap:5px;background:#5b8cff;color:#fff;border:0;border-radius:999px;padding:7px 14px;font:700 14px/1 inherit;font-family:inherit;cursor:pointer;min-height:34px;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+#refresh:active{transform:scale(.97)}#refresh[disabled]{opacity:.75;cursor:default}
+#refresh.ok{background:#13834a}#refresh.err{background:#b42318}
+#refresh.spin .ic{display:inline-block;animation:sp .8s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}

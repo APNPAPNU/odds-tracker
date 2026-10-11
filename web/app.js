@@ -16,18 +16,46 @@ function showTab() {
 window.addEventListener("hashchange", showTab);
 
 // ---------- data
+let lastLoad = 0, timer = null;
 async function load() {
   const bust = "?t=" + Date.now();
+  lastLoad = Date.now();
   try {
     const [meta, arbs, ev, vig] = await Promise.all(["meta", "arbs", "ev", "vig"].map(n =>
       fetch(`data/${n}.json${bust}`, {cache: "no-store"}).then(r => { if (!r.ok) throw new Error(n + " " + r.status); return r.json(); })));
     D = {meta, arbs, ev, vig};
     renderAll();
+    return true;
   } catch (e) {
     $("#upd").textContent = "Couldn't load data (" + e.message + "). Retrying in 1 min.";
     $("#upd").classList.add("old");
+    return false;
   }
 }
+function ageText() {
+  if (!D.meta) return "";
+  const m = Math.round((Date.now() - Date.parse(D.meta.generated_utc)) / 60000);
+  return m < 1 ? "data just published" : `data ${m} min old`;
+}
+
+// ---------- refresh button + auto-refresh (paused while the tab is hidden)
+const btn = $("#refresh");
+btn.addEventListener("click", async () => {
+  if (btn.disabled) return;
+  btn.disabled = true; btn.className = "spin"; btn.querySelector(".lbl").textContent = "Refreshing";
+  const ok = await load();
+  btn.className = ok ? "ok" : "err";
+  btn.querySelector(".lbl").textContent = ok ? `Updated \u00b7 ${ageText()}` : "Failed - retry";
+  startTimer();                       // next auto-refresh a full minute from now
+  setTimeout(() => { btn.className = ""; btn.querySelector(".lbl").textContent = "Refresh"; btn.disabled = false; }, 2500);
+});
+function startTimer() { clearInterval(timer); timer = setInterval(load, REFRESH_MS); }
+function stopTimer() { clearInterval(timer); timer = null; }
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { stopTimer(); return; }
+  if (Date.now() - lastLoad >= REFRESH_MS) load(); else renderUpdated();
+  startTimer();
+});
 function renderAll() { renderUpdated(); renderArbs(); renderEV(); renderVig(); renderAbout(); }
 
 function renderUpdated() {
@@ -95,7 +123,7 @@ document.querySelectorAll(".filters input,.filters select").forEach(el => el.add
   localStorage.setItem("ot_filters", JSON.stringify(F)); renderEV();
 }));
 function renderEV() {
-  const sel = $("#f-sport"), cur = sel.value, sports = [...new Set(D.ev.map(r => r.sport))].sort();
+  const sel = $("#f-sport"), cur = sel.value || F.sport || "", sports = [...new Set(D.ev.map(r => r.sport))].sort();
   sel.innerHTML = `<option value="">All</option>` + sports.map(s => `<option${s === cur ? " selected" : ""}>${esc(s)}</option>`).join("");
   if (cur && !sports.includes(cur)) { const o = document.createElement("option"); o.textContent = cur; o.selected = true; sel.appendChild(o); }
   const minEv = parseFloat($("#f-ev").value), maxOdds = parseFloat($("#f-odds").value), mkt = $("#f-mkt").value;
@@ -161,4 +189,4 @@ function renderAbout() {
     differ a lot from the other books. Limits, geography and promo terms can stop a bet, so always confirm before placing it.</p>`;
 }
 
-showTab(); load(); setInterval(load, REFRESH_MS);
+showTab(); load(); if (!document.hidden) startTimer();
